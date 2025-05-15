@@ -1,5 +1,18 @@
 Option Explicit
 
+Private Type PreviewProcessItem
+    ProcessName As String
+    Supplier As String
+    MaeDandoriTime As String
+    YujinTime As String
+    MachineTime As String
+    GoDandoriTime As String
+    Bikou As String
+End Type
+
+Private m_arrPreviewProcesses() As PreviewProcessItem ' プレビュー工程を格納する動的配列
+Private m_lPreviewProcessCount As Long              ' m_arrPreviewProcesses内の有効な工程数
+
 ' === モジュールレベル定数 ===
 Private Const SHEET_KOUTEIHYO As String = "工程表"
 Private Const SHEET_KOUTEI_TIMES As String = "シート2" ' ★工数・材質・外注先情報管理シート名
@@ -44,6 +57,183 @@ Private Const COL_OUTSOURCE_NAME As Long = 16     ' P列: 外注先名
 Private processTimesDict As Object ' 工程別工数・備考格納用Dictionary
 Private materialInfoDict As Object ' 材質情報格納用Dictionary
 Private outsourcingInfoDict As Object ' ★外注先情報格納用Dictionary
+
+Private Sub cmdDeletePreviewItem_Click()
+    Dim lSelectedIndex As Long
+    Dim lArrayIndexToDelete As Long
+    Dim i As Long
+
+    lSelectedIndex = Me.ListBoxPreview.ListIndex
+
+    ' アイテムが選択されているか、ヘッダー行(インデックス0)でないかを確認
+    If lSelectedIndex < 1 Then ' -1 (未選択) または 0 (ヘッダー行) の場合は処理しない
+        MsgBox "削除する工程をプレビューリストから選択してください（ヘッダー行以外）。", vbInformation
+        Exit Sub
+    End If
+
+    ' ListBoxのインデックスを配列のインデックスに変換 (ヘッダー行の分を引く)
+    lArrayIndexToDelete = lSelectedIndex - 1
+
+    ' 念のため、変換後の配列インデックスが有効な範囲内か確認
+    If lArrayIndexToDelete < 0 Or lArrayIndexToDelete >= m_lPreviewProcessCount Then
+        MsgBox "内部エラー: 選択されたインデックスが配列の範囲外です。処理を中断します。", vbCritical
+        Exit Sub
+    End If
+
+    ' ユーザーに削除の最終確認
+    If MsgBox("選択された工程「" & m_arrPreviewProcesses(lArrayIndexToDelete).ProcessName & "」をプレビューから削除しますか？", _
+              vbYesNo + vbQuestion, "削除の確認") = vbNo Then
+        Exit Sub '「いいえ」が選択されたら何もしない
+    End If
+
+    ' 配列から要素を削除 (指定されたインデックス以降の要素を一つ前に詰める)
+    If m_lPreviewProcessCount > 0 Then ' 配列に要素がある場合のみ処理
+        For i = lArrayIndexToDelete To m_lPreviewProcessCount - 2 ' 配列の末尾の一つ手前までループ
+            m_arrPreviewProcesses(i) = m_arrPreviewProcesses(i + 1)
+        Next i
+        
+        m_lPreviewProcessCount = m_lPreviewProcessCount - 1 ' 有効な要素数を1減らす
+        
+        ' 配列の最後の要素だった場所をクリア（任意ですが、念のため）
+        If m_lPreviewProcessCount >= 0 And m_lPreviewProcessCount <= UBound(m_arrPreviewProcesses) Then
+             ' 型の各要素を初期化 (文字列なら空文字、数値なら0など)
+             m_arrPreviewProcesses(m_lPreviewProcessCount).ProcessName = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).Supplier = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).MaeDandoriTime = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).YujinTime = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).MachineTime = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).GoDandoriTime = ""
+             m_arrPreviewProcesses(m_lPreviewProcessCount).Bikou = ""
+        End If
+
+        ' オプション：配列サイズを動的に縮小する場合 (要素数が大幅に減った場合など)
+        ' 今回は毎回縮小はせず、UpdatePreview時のReDimで調整される形でも問題ありません。
+        ' もし縮小するなら、例えば以下のような条件で。
+        ' If UBound(m_arrPreviewProcesses) > m_lPreviewProcessCount + 10 Then ' 空きが10個以上できたら
+        '    If m_lPreviewProcessCount > 0 Then
+        '        ReDim Preserve m_arrPreviewProcesses(0 To m_lPreviewProcessCount - 1)
+        '    ElseIf m_lPreviewProcessCount = 0 Then ' 全て削除された場合
+        '        Erase m_arrPreviewProcesses
+        '        ReDim m_arrPreviewProcesses(0 To 49) ' 初期サイズに戻す
+        '    End If
+        ' End If
+    End If
+
+    ' リストボックスの表示を更新
+    Call RefreshListBoxFromInternalArray
+
+    ' 削除後、可能であれば近くのアイテムを選択状態にする
+    If m_lPreviewProcessCount > 0 Then ' まだデータが残っていれば
+        If lSelectedIndex <= Me.ListBoxPreview.ListCount - 1 Then ' 削除した位置に次のアイテムがある場合
+            Me.ListBoxPreview.ListIndex = lSelectedIndex
+        ElseIf lSelectedIndex - 1 >= 1 Then ' 削除したのが末尾で、その前にアイテムがある場合 (ヘッダー除く)
+             Me.ListBoxPreview.ListIndex = lSelectedIndex - 1
+        Else
+            ' 残り1行になったが、それはヘッダーかもしれないので選択しない
+             Me.ListBoxPreview.ListIndex = -1
+        End If
+    Else
+         Me.ListBoxPreview.ListIndex = -1 ' データがなくなったら何も選択しない
+    End If
+
+    MsgBox "選択された工程をプレビューから削除しました。", vbInformation
+
+End Sub
+
+Private Sub cmdMoveDown_Click()
+    Dim lSelectedIndex As Long
+    Dim tempItem As PreviewProcessItem
+
+    ' リストボックスでアイテムが選択されているか確認
+    lSelectedIndex = Me.ListBoxPreview.ListIndex
+    If lSelectedIndex = -1 Then
+        MsgBox "移動する工程をリストから選択してください。", vbInformation
+        Exit Sub
+    End If
+
+    ' ヘッダー行(0) は対象外、データ行は1から ListCount-1 まで
+    If lSelectedIndex < 1 Or lSelectedIndex >= (Me.ListBoxPreview.ListCount - 1) Then
+        MsgBox "これ以上、下には移動できません。", vbInformation
+        Exit Sub
+    End If
+
+    ' ListBoxのインデックスはヘッダー行を含むため、配列のインデックスに変換 (ヘッダー分 -1)
+    ' 移動対象は選択されたアイテムなので、その配列インデックスは (lSelectedIndex - 1)
+    ' その一つ下と入れ替えるので、(lSelectedIndex - 1) と (lSelectedIndex) を入れ替える
+    Dim lArrayIndexToMove As Long
+    lArrayIndexToMove = lSelectedIndex - 1 ' 配列内での選択アイテムのインデックス
+
+    If lArrayIndexToMove < 0 Or lArrayIndexToMove >= m_lPreviewProcessCount Then ' 念のため範囲チェック
+        MsgBox "選択されたインデックスが不正です。", vbExclamation
+        Exit Sub
+    End If
+    If (lArrayIndexToMove + 1) >= m_lPreviewProcessCount Then ' さらに念のため下に移動できるかチェック
+         MsgBox "配列インデックスエラー（下）。", vbExclamation
+         Exit Sub
+    End If
+
+    ' 配列内でアイテムを入れ替え
+    tempItem = m_arrPreviewProcesses(lArrayIndexToMove)
+    m_arrPreviewProcesses(lArrayIndexToMove) = m_arrPreviewProcesses(lArrayIndexToMove + 1)
+    m_arrPreviewProcesses(lArrayIndexToMove + 1) = tempItem
+
+    ' リストボックスの表示を更新
+    Call RefreshListBoxFromInternalArray
+
+    ' 移動後も同じアイテムが選択された状態にする (一つ下に移動したのでインデックスは +1)
+    If (lSelectedIndex + 1) < Me.ListBoxPreview.ListCount Then
+      Me.ListBoxPreview.Selected(lSelectedIndex + 1) = True
+    End If
+
+End Sub
+
+Private Sub cmdMoveUp_Click()
+    Dim lSelectedIndex As Long
+    Dim tempItem As PreviewProcessItem
+
+    ' リストボックスでアイテムが選択されているか確認
+    lSelectedIndex = Me.ListBoxPreview.ListIndex
+    If lSelectedIndex = -1 Then
+        MsgBox "移動する工程をリストから選択してください。", vbInformation
+        Exit Sub
+    End If
+
+    ' ヘッダー行(0) または 最初のデータ行(1) が選択されている場合は上に移動できない
+    If lSelectedIndex <= 1 Then ' ヘッダーが0、最初のデータが1
+        MsgBox "これ以上、上には移動できません。", vbInformation
+        Exit Sub
+    End If
+
+    ' ListBoxのインデックスはヘッダー行を含むため、配列のインデックスに変換 (ヘッダー分 -1)
+    ' かつ、移動対象は選択されたアイテムなので、その配列インデックスは (lSelectedIndex - 1)
+    ' その一つ上と入れ替えるので、(lSelectedIndex - 1) と (lSelectedIndex - 2) を入れ替える
+    Dim lArrayIndexToMove As Long
+    lArrayIndexToMove = lSelectedIndex - 1 ' 配列内での選択アイテムのインデックス
+
+    If lArrayIndexToMove < 0 Or lArrayIndexToMove >= m_lPreviewProcessCount Then ' 念のため範囲チェック
+        MsgBox "選択されたインデックスが不正です。", vbExclamation
+        Exit Sub
+    End If
+    If (lArrayIndexToMove - 1) < 0 Then ' さらに念のため上に移動できるかチェック
+         MsgBox "配列インデックスエラー（上）。", vbExclamation
+         Exit Sub
+    End If
+
+
+    ' 配列内でアイテムを入れ替え
+    tempItem = m_arrPreviewProcesses(lArrayIndexToMove)
+    m_arrPreviewProcesses(lArrayIndexToMove) = m_arrPreviewProcesses(lArrayIndexToMove - 1)
+    m_arrPreviewProcesses(lArrayIndexToMove - 1) = tempItem
+
+    ' リストボックスの表示を更新
+    Call RefreshListBoxFromInternalArray
+
+    ' 移動後も同じアイテムが選択された状態にする (一つ上に移動したのでインデックスは -1)
+    If (lSelectedIndex - 1) < Me.ListBoxPreview.ListCount And (lSelectedIndex - 1) >= 1 Then ' ヘッダー行は選択させない
+      Me.ListBoxPreview.Selected(lSelectedIndex - 1) = True
+    End If
+
+End Sub
 
 ' === ユーザーフォーム初期化 ===
 Private Sub UserForm_Initialize()
@@ -291,9 +481,15 @@ End Sub
 
 ' === プレビュー更新サブルーチン ===
 Private Sub UpdatePreview()
-    Dim i As Long
+    Dim i As Long ' ★i の宣言はここにあると仮定（なければ元の位置のまま）
     Dim ctrl As Object ' 汎用コントロールオブジェクト変数
     Dim txtBox As MSForms.TextBox ' TextBox型変数
+
+    ' ★★★ ここから修正 ★★★
+    ' プレビュー用配列とカウンターを初期化
+    m_lPreviewProcessCount = 0
+    Erase m_arrPreviewProcesses  ' まず配列を解放します (未割り当ての状態でもエラーになりません)
+    ReDim m_arrPreviewProcesses(0 To 49)
 
     ' ListBoxの内容をクリア (ヘッダー行を除く)
     For i = Me.ListBoxPreview.ListCount - 1 To 1 Step -1
@@ -444,40 +640,113 @@ Private Sub UpdatePreview()
         If Not (materialCode = "NAK80" Or materialCode = "FDAC" Or materialCode = "SS400") Then Call PreviewAddHeatTreatment(materialCode, hasSubZero)
         Call PreviewAddPostHeatTreatmentProcesses(materialCode, shape, useWireEDM, isDia10OrLess, hasShapeProcessing, hasCuttingEdge, useAfterMC, useSmallStartHole, hasTsubaProcessing, tsubaCount, tsubaRoughMethod, needsPolishing, needsOutsourcingForCoating, coatingTypeKey, needsAdjustP, kataboriChoosenByUser, naraiKensakuChoosenByUser, autoSgCountValue, userSgCountValue)
     End If
-
+If m_lPreviewProcessCount > 0 Then
+    For i = 0 To m_lPreviewProcessCount - 1
+        With Me.ListBoxPreview
+            .AddItem m_arrPreviewProcesses(i).ProcessName
+            .List(.ListCount - 1, 1) = m_arrPreviewProcesses(i).Supplier
+            .List(.ListCount - 1, 2) = m_arrPreviewProcesses(i).MaeDandoriTime
+            .List(.ListCount - 1, 3) = m_arrPreviewProcesses(i).YujinTime
+            .List(.ListCount - 1, 4) = m_arrPreviewProcesses(i).MachineTime
+            .List(.ListCount - 1, 5) = m_arrPreviewProcesses(i).GoDandoriTime
+            .List(.ListCount - 1, 6) = m_arrPreviewProcesses(i).Bikou
+        End With
+    Next i
+Else
+Debug.Print "UpdatePreview: m_lPreviewProcessCount の値 = " & m_lPreviewProcessCount ' ★デバッグ用に追加
     If Me.ListBoxPreview.ListCount <= 1 Then
         Me.ListBoxPreview.AddItem "(プレビューする工程がありません)"
-        For i = 1 To Me.ListBoxPreview.ColumnCount - 1: Me.ListBoxPreview.List(Me.ListBoxPreview.ListCount - 1, i) = "": Next i
+        For i = 1 To Me.ListBoxPreview.ColumnCount - 1
+            Me.ListBoxPreview.List(Me.ListBoxPreview.ListCount - 1, i) = ""
+        Next i
+    End If
+End If
+End Sub
+Private Sub RefreshListBoxFromInternalArray()
+    Dim i As Long
+
+    ' ListBoxの内容をクリア (ヘッダー行を除く)
+    For i = Me.ListBoxPreview.ListCount - 1 To 1 Step -1 ' ヘッダー行(インデックス0)は残す
+        Me.ListBoxPreview.RemoveItem i
+    Next i
+    ' もしヘッダー行も消えてしまう可能性がある場合の再追加 (UserForm_Initializeにも同様のコードあり)
+    If Me.ListBoxPreview.ListCount = 0 Then
+         With Me.ListBoxPreview
+            .ColumnCount = 7 ' 念のため再設定
+            .ColumnWidths = "110;70;40;40;40;40;120" ' 念のため再設定
+            .AddItem "工程名"
+            .List(.ListCount - 1, 1) = "業者"
+            .List(.ListCount - 1, 2) = "前段取"
+            .List(.ListCount - 1, 3) = "有人"
+            .List(.ListCount - 1, 4) = "機械"
+            .List(.ListCount - 1, 5) = "後段取"
+            .List(.ListCount - 1, 6) = "備考"
+        End With
+    End If
+
+    ' m_arrPreviewProcesses 配列に格納されたデータをリストボックスに表示
+    If m_lPreviewProcessCount > 0 Then
+        For i = 0 To m_lPreviewProcessCount - 1
+            With Me.ListBoxPreview
+                .AddItem m_arrPreviewProcesses(i).ProcessName
+                .List(.ListCount - 1, 1) = m_arrPreviewProcesses(i).Supplier
+                .List(.ListCount - 1, 2) = m_arrPreviewProcesses(i).MaeDandoriTime
+                .List(.ListCount - 1, 3) = m_arrPreviewProcesses(i).YujinTime
+                .List(.ListCount - 1, 4) = m_arrPreviewProcesses(i).MachineTime
+                .List(.ListCount - 1, 5) = m_arrPreviewProcesses(i).GoDandoriTime
+                .List(.ListCount - 1, 6) = m_arrPreviewProcesses(i).Bikou
+            End With
+        Next i
+    Else
+        ' プレビューする工程がない場合の処理
+        If Me.ListBoxPreview.ListCount <= 1 Then
+             Me.ListBoxPreview.AddItem "(プレビューする工程がありません)"
+             Dim j As Long
+             For j = 1 To Me.ListBoxPreview.ColumnCount - 1
+                 Me.ListBoxPreview.List(Me.ListBoxPreview.ListCount - 1, j) = ""
+             Next j
+        End If
     End If
 End Sub
+
 ' リストボックスにアイテムを追加するヘルパーサブルーチン
-Private Sub AddItemToPreviewList(procName As String, Optional supplier As String = "", _
+Private Sub AddItemToPreviewList(procName As String, Optional Supplier As String = "", _
                                 Optional maeD As Variant = "", Optional yujin As Variant = "", Optional machine As Variant = "", Optional goD As Variant = "", _
                                 Optional remark As String = "")
-    With Me.ListBoxPreview
-        .AddItem procName
-        .List(.ListCount - 1, 1) = supplier
-        .List(.ListCount - 1, 2) = CStr(maeD)
-        .List(.ListCount - 1, 3) = CStr(yujin)
-        .List(.ListCount - 1, 4) = CStr(machine)
-        .List(.ListCount - 1, 5) = CStr(goD)
-        .List(.ListCount - 1, 6) = remark
+                               
+    ' 配列の現在のサイズを確認し、必要であれば拡張する
+    If m_lPreviewProcessCount > UBound(m_arrPreviewProcesses) Then
+        ReDim Preserve m_arrPreviewProcesses(0 To m_lPreviewProcessCount + 9)
+    End If
+
+    ' 配列にデータを格納
+    With m_arrPreviewProcesses(m_lPreviewProcessCount)
+        .ProcessName = procName
+        .Supplier = Supplier
+        .MaeDandoriTime = CStr(maeD)
+        .YujinTime = CStr(yujin)
+        .MachineTime = CStr(machine)
+        .GoDandoriTime = CStr(goD)
+        .Bikou = remark
     End With
+
+    ' 格納した工程数をインクリメント
+    m_lPreviewProcessCount = m_lPreviewProcessCount + 1
 End Sub
 
 ' --- プレビュー用の各種工程追加サブルーチン ---
 Private Sub PreviewAddMaterialPurchase(materialCodePreview As String, noChamferPreview As Boolean, hasLiftingScrewPreview As Boolean)
-    Dim supplier As String, materialData As Variant, normalizedMaterialCode As String
+    Dim Supplier As String, materialData As Variant, normalizedMaterialCode As String
     normalizedMaterialCode = UCase(Trim(materialCodePreview))
     If materialInfoDict Is Nothing Or Not materialInfoDict.Exists(normalizedMaterialCode) Then
-        supplier = "(仕入先不明)"
+        Supplier = "(仕入先不明)"
     Else
         materialData = materialInfoDict(normalizedMaterialCode)
-        supplier = CStr(materialData(0))
+        Supplier = CStr(materialData(0))
     End If
     Dim specificMemo As String: specificMemo = IIf(noChamferPreview, "Cなし", "Cあり")
     If hasLiftingScrewPreview Then specificMemo = specificMemo & ",吊り"
-    Call AddItemToPreviewList("主材購入", supplier, "", "", "", "", specificMemo)
+    Call AddItemToPreviewList("主材購入", Supplier, "", "", "", "", specificMemo)
 End Sub
 
 Private Sub PreviewAddMCBeforeHeatTreatment(shapePreview As String, reduceToOneStepPreview As Boolean, increaseToThreeStepsPreview As Boolean)
@@ -501,13 +770,13 @@ End If
 End Sub
 
 Private Sub PreviewAddTapHole(hasSubZeroPreview As Boolean)
-    Dim specificMemo As String, remarksFromSheetF As String, finalMemo As String, times As Variant, maeDandoriTime As String
+    Dim specificMemo As String, remarksFromSheetF As String, finalMemo As String, times As Variant, MaeDandoriTime As String
     If hasSubZeroPreview Then specificMemo = "ｻﾌﾞｾﾞﾛ注意" Else specificMemo = ""
     times = GetProcessTimes("穴あけﾀｯﾌﾟ")
     If IsArray(times) Then
-        maeDandoriTime = CStr(times(0)): remarksFromSheetF = CStr(times(4))
+        MaeDandoriTime = CStr(times(0)): remarksFromSheetF = CStr(times(4))
         If specificMemo <> "" Then finalMemo = specificMemo Else finalMemo = remarksFromSheetF
-        Call AddItemToPreviewList("穴あけﾀｯﾌﾟ", "", maeDandoriTime, CStr(times(1)), CStr(times(2)), CStr(times(3)), finalMemo)
+        Call AddItemToPreviewList("穴あけﾀｯﾌﾟ", "", MaeDandoriTime, CStr(times(1)), CStr(times(2)), CStr(times(3)), finalMemo)
     Else
         finalMemo = specificMemo & IIf(specificMemo <> "", " ", "") & "(※工数/備考未設定)"
         Call AddItemToPreviewList("穴あけﾀｯﾌﾟ", "", "", "0.3", "", "", finalMemo)
@@ -515,15 +784,15 @@ Private Sub PreviewAddTapHole(hasSubZeroPreview As Boolean)
 End Sub
 
 Private Sub PreviewAddHeatTreatment(materialCodePreview As String, hasSubZeroPreview As Boolean)
-    Dim supplier As String, materialData As Variant, normalizedMaterialCode As String
+    Dim Supplier As String, materialData As Variant, normalizedMaterialCode As String
     normalizedMaterialCode = UCase(Trim(materialCodePreview))
     
     If materialInfoDict Is Nothing Or Not materialInfoDict.Exists(normalizedMaterialCode) Then
-        supplier = ""
+        Supplier = ""
         If hasSubZeroPreview Then
-            supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
-            If supplier = "" Then
-                supplier = "ｴｼﾞｿﾝ熱処理(仮)"
+            Supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
+            If Supplier = "" Then
+                Supplier = "ｴｼﾞｿﾝ熱処理(仮)"
             End If
         End If
         ' (サブゼロなしの場合のフォールバックも必要なら追加)
@@ -532,22 +801,22 @@ Private Sub PreviewAddHeatTreatment(materialCodePreview As String, hasSubZeroPre
         materialData = materialInfoDict(normalizedMaterialCode)
         
         If hasSubZeroPreview Then
-            supplier = CStr(materialData(2))
-            If supplier = "" Then
-                supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
-                If supplier = "" Then
-                    supplier = "ｴｼﾞｿﾝ熱処理(仮)"
+            Supplier = CStr(materialData(2))
+            If Supplier = "" Then
+                Supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
+                If Supplier = "" Then
+                    Supplier = "ｴｼﾞｿﾝ熱処理(仮)"
                 End If
             End If
         Else
-            supplier = CStr(materialData(1))
+            Supplier = CStr(materialData(1))
         End If
         
     End If
     
-    If supplier = "" Then supplier = "(熱処理業者不明)"
+    If Supplier = "" Then Supplier = "(熱処理業者不明)"
     
-    Call AddItemToPreviewList("熱処理", supplier, "", "", "", "", IIf(hasSubZeroPreview, "サブゼロ有", "サブゼロ無"))
+    Call AddItemToPreviewList("熱処理", Supplier, "", "", "", "", IIf(hasSubZeroPreview, "サブゼロ有", "サブゼロ無"))
 End Sub
 
 
@@ -577,7 +846,7 @@ Private Sub PreviewAddPostHeatTreatmentSG(shapePreview As String, useWireEDMPrev
     If IsArray(times) Then maeDandori = CStr(times(0)): yTime = CStr(times(1)): mTime = CStr(times(2)): sTimeBase = CStr(times(3)) Else maeDandori = "": yTime = "0.3": mTime = "0.3": sTimeBase = "0.1"
     For i = 1 To sgCount
         sTimeFinal = IIf(i = sgCount, sTimeBase, ""): specificMemo = i & "/" & sgCount
-        Call AddItemToPreviewList("平面研削 NC", "", maeDandori, yTime, mTime, sTimeFinal, specificMemo & " (SG)" & IIf(IsArray(times), "", " (※工数未設定)"))
+        Call AddItemToPreviewList("平面研削 NC", "", maeDandori, yTime, mTime, sTimeFinal, specificMemo & " " & IIf(IsArray(times), "", " (※工数未設定)"))
     Next i
 End Sub
 
@@ -621,14 +890,14 @@ End Sub
 Private Sub PreviewAddSmallStartHole()
     Dim times As Variant
     Dim remarksFromSheetF As String
-    Dim maeDandoriTime As String
+    Dim MaeDandoriTime As String
     
     times = GetProcessTimes("細穴放電加工")
     
     If IsArray(times) Then
-        maeDandoriTime = CStr(times(0))
+        MaeDandoriTime = CStr(times(0))
         remarksFromSheetF = CStr(times(4))
-        Call AddItemToPreviewList("細穴放電加工", "", maeDandoriTime, CStr(times(1)), CStr(times(2)), CStr(times(3)), remarksFromSheetF)
+        Call AddItemToPreviewList("細穴放電加工", "", MaeDandoriTime, CStr(times(1)), CStr(times(2)), CStr(times(3)), remarksFromSheetF)
     Else
         Call AddItemToPreviewList("細穴放電加工", "", "", "0.8", "", "0.1", "※工数/備考未設定")
     End If
@@ -1082,64 +1351,66 @@ Private Function GetShapeFromOptionButtons() As String
 End Function
 
 Private Sub CommandButton1_Click()
-    Dim ws As Worksheet, targetRow As Long, currentRow As Long, materialCodeInput As String, zValue As String
-    Dim coatingTypeKeyCmd As String, hasSubZeroCmd As Boolean, needsOutsourcingForCoatingCmd As Boolean, needsPolishingCmd As Boolean
-    Dim shapeCmd As String, useWireEDMCmd As Boolean, isDia10OrLessCmd As Boolean, hasShapeProcessingCmd As Boolean
-    Dim hasCuttingEdgeCmd As Boolean, isOutsourcedProductCmd As Boolean, isMisumiPurchaseCmd As Boolean
-    Dim hasAdditionalProcessingCmd As Boolean, additionalProcessNameCmd As String, isLayoutAfterCutCmd As Boolean
-    Dim needsAdjustPCmd As Boolean, useAfterMCCmd As Boolean, isGeibiOutsourceCmd As Boolean, geibiPatternCmd As String
-    Dim hasTsubaProcessingCmd As Boolean, tsubaCountCmd As Integer, tsubaRoughMethodCmd As String
-    Dim noChamferCmd As Boolean, hasLiftingScrewCmd As Boolean, useSmallStartHoleCmd As Boolean
-    Dim kataboriChoosenByUserCmd As Boolean, naraiKensakuChoosenByUserCmd As Boolean
-    Dim isSingleMCPreHeatCmd As Boolean, isTripleMCPreHeatCmd As Boolean
-    Dim autoSgCountCmd As Boolean, userSgCountCmd As Integer
-    Dim materialCodeActual As String
+    Dim ws As Worksheet
+    Dim targetRow As Long
+    Dim currentRow As Long
+    Dim i As Long ' ループカウンター
 
     Application.ScreenUpdating = False
     On Error GoTo ErrorHandler
+
+    ' 対象シートと開始行の検証 (この部分は元のコードと同じです)
     Set ws = ThisWorkbook.Sheets(SHEET_KOUTEIHYO)
     If Not ValidateActiveCell(ws, targetRow) Then GoTo Finally
-    currentRow = targetRow
-    zValue = Trim(CStr(ws.Cells(targetRow, COL_Z_INPUT).Value))
-    materialCodeInput = Trim(CStr(ws.Cells(targetRow, COL_AC_INPUT).Value))
-    materialCodeActual = GetMaterialName(materialCodeInput)
-    If materialCodeActual = "" Then MsgBox "材質コード「" & materialCodeInput & "」がシート「" & SHEET_KOUTEI_TIMES & "」のJ列に見つかりません。", vbExclamation: GoTo Finally
-    Call ParseZColumnInfo(zValue, coatingTypeKeyCmd, hasSubZeroCmd, needsOutsourcingForCoatingCmd, needsPolishingCmd)
-    isGeibiOutsourceCmd = Me.CheckBoxGeibi.Value: If isGeibiOutsourceCmd Then geibiPatternCmd = Me.ComboBoxGeibiType.Value
-    shapeCmd = GetShapeFromOptionButtons(): useWireEDMCmd = Me.CheckBox1.Value: If shapeCmd = "ファミリー加工" Then useWireEDMCmd = True
-    isDia10OrLessCmd = Me.CheckBox4.Value: hasShapeProcessingCmd = Me.CheckBox5.Value: hasCuttingEdgeCmd = Me.CheckBox6.Value
-    isOutsourcedProductCmd = Me.CheckBox9.Value: isMisumiPurchaseCmd = Me.CheckBox7.Value
-    hasAdditionalProcessingCmd = Me.CheckBox8.Value: If hasAdditionalProcessingCmd Then additionalProcessNameCmd = Me.ComboBox3.Value
-    isLayoutAfterCutCmd = Me.CheckBoxLayout.Value: useAfterMCCmd = Me.CheckBoxAfterMC.Value
-    needsAdjustPCmd = Me.CheckBoxAdjustP.Value: hasTsubaProcessingCmd = Me.CheckBoxTsuba.Value
-    If hasTsubaProcessingCmd Then tsubaCountCmd = Val(Me.ComboBoxTsubaCount.Value): tsubaRoughMethodCmd = Me.ComboBoxTsubaRough.Value
-    noChamferCmd = Me.CheckBoxChamferなし.Value: hasLiftingScrewCmd = Me.CheckBoxTsurinejiあり.Value
-    useSmallStartHoleCmd = Me.CheckBoxStartHoleSmall.Value
-    If TypeName(Me.Controls("CheckBoxKatabori")) = "CheckBox" Then kataboriChoosenByUserCmd = Me.CheckBoxKatabori.Value Else kataboriChoosenByUserCmd = False
-    If TypeName(Me.Controls("CheckBoxNaraiKensaku")) = "CheckBox" Then naraiKensakuChoosenByUserCmd = Me.CheckBoxNaraiKensaku.Value Else naraiKensakuChoosenByUserCmd = False
-    If TypeName(Me.Controls("CheckBoxSingleMCPreHeat")) = "CheckBox" Then isSingleMCPreHeatCmd = Me.CheckBoxSingleMCPreHeat.Value Else isSingleMCPreHeatCmd = False
-    If TypeName(Me.Controls("CheckBoxTripleMCPreHeat")) = "CheckBox" Then isTripleMCPreHeatCmd = Me.CheckBoxTripleMCPreHeat.Value Else isTripleMCPreHeatCmd = False
-    If TypeName(Me.Controls("CheckBoxAutoSgCount")) = "CheckBox" Then autoSgCountCmd = Me.CheckBoxAutoSgCount.Value Else autoSgCountCmd = True
-    If Not autoSgCountCmd And TypeName(Me.Controls("ComboBoxSgCount")) = "ComboBox" Then
-        If Me.ComboBoxSgCount.ListIndex > -1 Then userSgCountCmd = Val(Me.ComboBoxSgCount.Value) Else userSgCountCmd = 3: MsgBox "SG回数が選択されていません。デフォルト値 (3回) を使用します。", vbInformation
-    Else: userSgCountCmd = 0
-    End If
-    If isOutsourcedProductCmd Then
-    Call ProcessOutsourcedProduct(ws, currentRow, targetRow, coatingTypeKeyCmd, needsOutsourcingForCoatingCmd, needsAdjustPCmd, Me.ComboBox2.Value)
-ElseIf isMisumiPurchaseCmd Then
-    Call ProcessMisumiPurchase(ws, currentRow, targetRow, hasAdditionalProcessingCmd, additionalProcessNameCmd, needsAdjustPCmd)
-ElseIf isLayoutAfterCutCmd Then
-    Call ProcessLayoutAfterCut(ws, currentRow, targetRow, needsPolishingCmd, hasCuttingEdgeCmd, needsOutsourcingForCoatingCmd, coatingTypeKeyCmd, needsAdjustPCmd, hasTsubaProcessingCmd, tsubaCountCmd, tsubaRoughMethodCmd, kataboriChoosenByUserCmd, naraiKensakuChoosenByUserCmd, useAfterMCCmd, shapeCmd)
-ElseIf isGeibiOutsourceCmd Then
-    Call ProcessGeibiOutsource(ws, currentRow, targetRow, materialCodeActual, geibiPatternCmd, hasSubZeroCmd, shapeCmd, useWireEDMCmd, isDia10OrLessCmd, hasShapeProcessingCmd, hasCuttingEdgeCmd, useAfterMCCmd, useSmallStartHoleCmd, hasTsubaProcessingCmd, tsubaCountCmd, tsubaRoughMethodCmd, needsPolishingCmd, needsOutsourcingForCoatingCmd, coatingTypeKeyCmd, needsAdjustPCmd, noChamferCmd, hasLiftingScrewCmd, kataboriChoosenByUserCmd, naraiKensakuChoosenByUserCmd, isSingleMCPreHeatCmd, isTripleMCPreHeatCmd, autoSgCountCmd, userSgCountCmd)
-Else
-    Call ProcessNormalRoute(ws, currentRow, targetRow, materialCodeActual, hasSubZeroCmd, shapeCmd, useWireEDMCmd, isDia10OrLessCmd, hasShapeProcessingCmd, hasCuttingEdgeCmd, useAfterMCCmd, useSmallStartHoleCmd, hasTsubaProcessingCmd, tsubaCountCmd, tsubaRoughMethodCmd, needsPolishingCmd, needsOutsourcingForCoatingCmd, coatingTypeKeyCmd, needsAdjustPCmd, noChamferCmd, hasLiftingScrewCmd, kataboriChoosenByUserCmd, naraiKensakuChoosenByUserCmd, isSingleMCPreHeatCmd, isTripleMCPreHeatCmd, autoSgCountCmd, userSgCountCmd)
-End If
+    currentRow = targetRow ' 最初の書き込み行をセット
 
-    MsgBox "工程作成が完了しました。", vbInformation
-Finally: Application.ScreenUpdating = True: Unload Me: Exit Sub
-ErrorHandler: MsgBox "エラー発生: " & Err.Number & " - " & Err.Description, vbCritical: Resume Finally
+    '-----------------------------------------------------------------------
+    ' ★★★ ここから下のロジックが、配列ベースの出力に変更されています ★★★
+    '
+    ' 従来のオプション読み取りや、それに基づく分岐処理 (ProcessOutsourcedProduct, ProcessMisumiPurchaseなど) は
+    ' m_arrPreviewProcesses 配列に既にデータが格納されているため、このサブルーチン内では不要になりました。
+    '
+    '-----------------------------------------------------------------------
+
+    ' m_arrPreviewProcesses 配列にデータがあるか確認
+    If m_lPreviewProcessCount > 0 Then
+        ' 配列の最初から最後までループして、各工程情報をシートに書き込む
+        For i = 0 To m_lPreviewProcessCount - 1
+            ' 既存の AddProcessToSheet サブルーチンを呼び出してシートに書き込みます。
+            ' AddProcessToSheet の第3引数 initialTargetRow には、targetRow を渡します。
+            Call AddProcessToSheet( _
+                ws, _
+                currentRow, _
+                targetRow, _
+                m_arrPreviewProcesses(i).ProcessName, _
+                m_arrPreviewProcesses(i).Supplier, _
+                m_arrPreviewProcesses(i).MaeDandoriTime, _
+                m_arrPreviewProcesses(i).YujinTime, _
+                m_arrPreviewProcesses(i).MachineTime, _
+                m_arrPreviewProcesses(i).GoDandoriTime, _
+                m_arrPreviewProcesses(i).Bikou _
+            )
+            ' currentRow は AddProcessToSheet サブルーチン内で
+            ' ByRef参照渡しにより、次の行を指すようにインクリメントされる想定です。
+            ' (元の AddProcessToSheet の実装がそうなっていることを確認済みです)
+        Next i
+        MsgBox "工程作成が完了しました。", vbInformation
+    Else
+        ' 出力する工程データがない場合
+        MsgBox "プレビューに表示されている工程がありません。出力処理を中断します。", vbExclamation
+        GoTo Finally ' 何もせず終了
+    End If
+
+Finally:
+    Application.ScreenUpdating = True
+    Unload Me ' フォームを閉じる
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "エラー発生: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume Finally ' エラー発生時も Finally を通って終了
 End Sub
+
 
 Private Function ValidateActiveCell(ByVal targetSheet As Worksheet, ByRef outTargetRow As Long) As Boolean
     ValidateActiveCell = False
@@ -1150,24 +1421,71 @@ Private Function ValidateActiveCell(ByVal targetSheet As Worksheet, ByRef outTar
 End Function
 
 Private Sub CommandButton単品挿入_Click()
-    Dim 工程名 As String: 工程名 = Me.ComboBox工程選択.Value: If 工程名 = "" Then MsgBox "工程を選択", vbExclamation: Exit Sub
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Sheets(SHEET_KOUTEIHYO)
-    Dim r As Long: If Not ValidateActiveCell(ws, r) Then Exit Sub
-    Dim times As Variant, remarksFromSheetF As String, maeDandoriTime As String
-    times = GetProcessTimes(工程名)
-    Application.ScreenUpdating = False: On Error GoTo SingleInsertErrorHandler
-    ws.Rows(r).Insert Shift:=xlDown: ws.Cells(r, COL_KOUTEI).Value = 工程名
-    If IsArray(times) Then
-        maeDandoriTime = CStr(times(0)): If maeDandoriTime <> "" Then ws.Cells(r, COL_MAE_DANDORI_OUTPUT).Value = maeDandoriTime
-        ws.Cells(r, COL_JINKAN_YUJIN).Value = times(1): ws.Cells(r, COL_JINKAN_MACHINE).Value = times(2): ws.Cells(r, COL_JINKAN_SETUP).Value = times(3)
-        remarksFromSheetF = CStr(times(4)): If remarksFromSheetF <> "" Then ws.Cells(r, COL_BIKOU).Value = remarksFromSheetF
-    Else
-        ws.Cells(r, COL_JINKAN_YUJIN).Resize(1, 3).Value = Array("", "", ""): ws.Cells(r, COL_MAE_DANDORI_OUTPUT).Value = ""
-        ws.Cells(r, COL_BIKOU).Value = "※工数/備考未設定"
+    Dim sProcessName As String
+    Dim processDataTimes As Variant ' GetProcessTimes から返される工数・備考データ
+    Dim sMaeDandori As String
+    Dim sYujinTime As String
+    Dim sMachineTime As String
+    Dim sGoDandoriTime As String
+    Dim sBikou As String
+
+    ' ComboBoxから選択された工程名を取得
+    sProcessName = Me.ComboBox工程選択.Value
+    If sProcessName = "" Then
+        MsgBox "工程をリストから選択してください。", vbExclamation
+        Exit Sub
     End If
-    MsgBox "単品工程「" & 工程名 & "」挿入完了", vbInformation
-SingleInsertFinally: Application.ScreenUpdating = True: Exit Sub
-SingleInsertErrorHandler: MsgBox "単品工程挿入エラー: " & Err.Number & " - " & Err.Description, vbCritical: Resume SingleInsertFinally
+
+    ' 選択された工程の工数・備考情報をマスターデータから取得
+    processDataTimes = GetProcessTimes(sProcessName)
+
+    ' GetProcessTimesが適切な配列を返したか確認
+    If IsArray(processDataTimes) Then
+        ' processDataTimes 配列のインデックスは0から始まる想定
+        ' 0: 前段取, 1: 有人, 2: 機械, 3: 後段取, 4: 備考 (シート2のF列), 5: 詳細備考 (シート2のG列)
+        sMaeDandori = CStr(processDataTimes(0))
+        sYujinTime = CStr(processDataTimes(1))
+        sMachineTime = CStr(processDataTimes(2))
+        sGoDandoriTime = CStr(processDataTimes(3))
+        sBikou = CStr(processDataTimes(4)) ' シート2のF列の備考を使用
+    Else
+        ' マスターに工数情報が見つからない場合でも、工程名だけで追加する
+        sMaeDandori = ""
+        sYujinTime = ""
+        sMachineTime = ""
+        sGoDandoriTime = ""
+        sBikou = "※工数/備考未設定"
+    End If
+
+    ' プレビュー用の内部配列 m_arrPreviewProcesses に新しい工程データを追加
+    ' (既存の AddItemToPreviewList サブルーチンを呼び出します。このサブルーチンは
+    '  既に m_arrPreviewProcesses 配列への追加と m_lPreviewProcessCount の更新を行います)
+' 単品挿入では業者は空、または別途指定する方法を検討
+Call AddItemToPreviewList( _
+    procName:=sProcessName, _
+    Supplier:="", _
+    maeD:=sMaeDandori, _
+    yujin:=sYujinTime, _
+    machine:=sMachineTime, _
+    goD:=sGoDandoriTime, _
+    remark:=sBikou _
+)
+
+
+    ' リストボックスの表示を、更新された m_arrPreviewProcesses 配列の内容で再描画
+    Call RefreshListBoxFromInternalArray
+
+    MsgBox "工程「" & sProcessName & "」をプレビューの末尾に追加しました。", vbInformation
+
+    ' --- 以下は旧コードからの削除または変更点 ---
+    ' Dim ws As Worksheet: Set ws = ThisWorkbook.Sheets(SHEET_KOUTEIHYO) や
+    ' Dim r As Long: If Not ValidateActiveCell(ws, r) Then Exit Sub は不要になります。
+    ' ws.Rows(r).Insert や ws.Cells(r, COL_KOUTEI).Value = 工程名 といった
+    ' シートへの直接書き込み処理も全て不要になります。
+    ' Application.ScreenUpdating の制御も、シート操作がなくなったため不要です。
+    ' エラーハンドリングは、GetProcessTimes の結果判定でカバーされる部分が多くなりますが、
+    ' 必要に応じて残すか、よりシンプルな形にできます。今回は上記のようにしています。
+
 End Sub
 Private Sub CommandButton2_Click()
     ' (元のコードのまま)
@@ -1183,19 +1501,19 @@ End Function
 ' ここでは宣言のみ、または主要なもののみ簡略化して記載します。
 ' 実際の運用では元のコード全体が必要です。
 
-Private Sub AddProcessToSheet(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, processName As String, Optional supplier As String = "", Optional maeDandoriTime As Variant = "", Optional yujinTime As Variant = "", Optional machineTime As Variant = "", Optional goDandoriTime As Variant = "", Optional memo As String = "")
+Private Sub AddProcessToSheet(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, ProcessName As String, Optional Supplier As String = "", Optional MaeDandoriTime As Variant = "", Optional YujinTime As Variant = "", Optional MachineTime As Variant = "", Optional GoDandoriTime As Variant = "", Optional memo As String = "")
    If currentRow > initialTargetRow Then
     ws.Rows(currentRow).Insert Shift:=xlDown
 ElseIf ws.Cells(currentRow, COL_KOUTEI).Value <> "" Or ws.Cells(currentRow, COL_JINKAN_YUJIN).Value <> "" Then
     ws.Rows(currentRow).Insert Shift:=xlDown
 End If
 
-    If processName <> "" Then ws.Cells(currentRow, COL_KOUTEI).Value = processName
-    If supplier <> "" Then ws.Cells(currentRow, COL_GYOUSHA).Value = supplier
-    If Not IsEmpty(maeDandoriTime) And maeDandoriTime <> "" Then ws.Cells(currentRow, COL_MAE_DANDORI_OUTPUT).Value = maeDandoriTime
-    If Not IsEmpty(yujinTime) And yujinTime <> "" Then ws.Cells(currentRow, COL_JINKAN_YUJIN).Value = yujinTime
-    If Not IsEmpty(machineTime) And machineTime <> "" Then ws.Cells(currentRow, COL_JINKAN_MACHINE).Value = machineTime
-    If Not IsEmpty(goDandoriTime) And goDandoriTime <> "" Then ws.Cells(currentRow, COL_JINKAN_SETUP).Value = goDandoriTime
+    If ProcessName <> "" Then ws.Cells(currentRow, COL_KOUTEI).Value = ProcessName
+    If Supplier <> "" Then ws.Cells(currentRow, COL_GYOUSHA).Value = Supplier
+    If Not IsEmpty(MaeDandoriTime) And MaeDandoriTime <> "" Then ws.Cells(currentRow, COL_MAE_DANDORI_OUTPUT).Value = MaeDandoriTime
+    If Not IsEmpty(YujinTime) And YujinTime <> "" Then ws.Cells(currentRow, COL_JINKAN_YUJIN).Value = YujinTime
+    If Not IsEmpty(MachineTime) And MachineTime <> "" Then ws.Cells(currentRow, COL_JINKAN_MACHINE).Value = MachineTime
+    If Not IsEmpty(GoDandoriTime) And GoDandoriTime <> "" Then ws.Cells(currentRow, COL_JINKAN_SETUP).Value = GoDandoriTime
     If memo <> "" Then ws.Cells(currentRow, COL_BIKOU).Value = memo
     currentRow = currentRow + 1
 End Sub
@@ -1331,11 +1649,11 @@ End If
 End Sub
 Private Sub AddMaterialPurchase(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, materialCodeActual As String, noChamferCmd As Boolean, hasLiftingScrewCmd As Boolean)
     ' (元のコードを参照)
-    Dim supplier As String, materialData As Variant, normalizedMaterialCode As String, specificMemo As String
+    Dim Supplier As String, materialData As Variant, normalizedMaterialCode As String, specificMemo As String
     normalizedMaterialCode = UCase(Trim(materialCodeActual))
-    If materialInfoDict Is Nothing Or Not materialInfoDict.Exists(normalizedMaterialCode) Then supplier = "" Else materialData = materialInfoDict(normalizedMaterialCode): supplier = CStr(materialData(0))
+    If materialInfoDict Is Nothing Or Not materialInfoDict.Exists(normalizedMaterialCode) Then Supplier = "" Else materialData = materialInfoDict(normalizedMaterialCode): Supplier = CStr(materialData(0))
     specificMemo = IIf(noChamferCmd, "Cなし", "Cあり"): If hasLiftingScrewCmd Then specificMemo = specificMemo & ",吊り"
-    Call AddProcessToSheet(ws, currentRow, initialTargetRow, "主材購入", supplier, , , , , specificMemo)
+    Call AddProcessToSheet(ws, currentRow, initialTargetRow, "主材購入", Supplier, , , , , specificMemo)
 End Sub
 Private Sub AddMCBeforeHeatTreatment(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, shapeCmd As String, reduceToOneStepCmd As Boolean, increaseToThreeStepsCmd As Boolean)
     ' (元のコードを参照)
@@ -1354,7 +1672,7 @@ End If
     For i = 1 To loopCount: sTimeFinal = IIf(i = loopCount, sTimeBase, ""): specificMemo = i & "/" & loopCount: Call AddProcessToSheet(ws, currentRow, initialTargetRow, mcProcessName, , maeDandori, yTime, mTime, sTimeFinal, specificMemo): Next i
 End Sub
 Private Sub AddTapHole(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, hasSubZeroCmd As Boolean)
-    Dim specificMemo As String, remarksFromSheetF As String, finalMemo As String, times As Variant, maeDandoriTime As String
+    Dim specificMemo As String, remarksFromSheetF As String, finalMemo As String, times As Variant, MaeDandoriTime As String
 
     If hasSubZeroCmd Then
         specificMemo = "ｻﾌﾞｾﾞﾛ注意"
@@ -1365,7 +1683,7 @@ Private Sub AddTapHole(ws As Worksheet, ByRef currentRow As Long, initialTargetR
     times = GetProcessTimes("穴あけﾀｯﾌﾟ")
     
     If IsArray(times) Then
-        maeDandoriTime = CStr(times(0))
+        MaeDandoriTime = CStr(times(0))
         remarksFromSheetF = CStr(times(4))
         
         If specificMemo <> "" Then
@@ -1374,7 +1692,7 @@ Private Sub AddTapHole(ws As Worksheet, ByRef currentRow As Long, initialTargetR
             finalMemo = remarksFromSheetF
         End If
 
-        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "穴あけﾀｯﾌﾟ", , maeDandoriTime, times(1), times(2), times(3), finalMemo)
+        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "穴あけﾀｯﾌﾟ", , MaeDandoriTime, times(1), times(2), times(3), finalMemo)
     Else
         finalMemo = specificMemo & IIf(specificMemo <> "", " ", "") & "(※工数/備考未設定)"
         Call AddProcessToSheet(ws, currentRow, initialTargetRow, "穴あけﾀｯﾌﾟ", , "", "0.3", , , finalMemo)
@@ -1382,16 +1700,16 @@ Private Sub AddTapHole(ws As Worksheet, ByRef currentRow As Long, initialTargetR
 End Sub
 
 Private Sub AddHeatTreatment(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long, materialCodeActual As String, hasSubZeroCmd As Boolean)
-    Dim supplier As String, materialData As Variant, normalizedMaterialCode As String
+    Dim Supplier As String, materialData As Variant, normalizedMaterialCode As String
     normalizedMaterialCode = UCase(Trim(materialCodeActual))
     
     If materialInfoDict Is Nothing Or Not materialInfoDict.Exists(normalizedMaterialCode) Then
-        supplier = ""
+        Supplier = ""
         
         If hasSubZeroCmd Then
-            supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
-            If supplier = "" Then
-                supplier = "ｴｼﾞｿﾝ熱処理"
+            Supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
+            If Supplier = "" Then
+                Supplier = "ｴｼﾞｿﾝ熱処理"
             End If
         End If
 
@@ -1399,22 +1717,22 @@ Private Sub AddHeatTreatment(ws As Worksheet, ByRef currentRow As Long, initialT
         materialData = materialInfoDict(normalizedMaterialCode)
         
         If hasSubZeroCmd Then
-            supplier = CStr(materialData(2))
-            If supplier = "" Then
-                supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
-                If supplier = "" Then
-                    supplier = "ｴｼﾞｿﾝ熱処理"
+            Supplier = CStr(materialData(2))
+            If Supplier = "" Then
+                Supplier = GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT")
+                If Supplier = "" Then
+                    Supplier = "ｴｼﾞｿﾝ熱処理"
                 End If
             End If
         Else
-            supplier = CStr(materialData(1))
+            Supplier = CStr(materialData(1))
         End If
 
     End If
 
-    If supplier <> "" Then
-        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "熱処理", supplier, , , , , IIf(hasSubZeroCmd, "サブゼロ有", ""))
-    ElseIf hasSubZeroCmd And supplier = "" Then
+    If Supplier <> "" Then
+        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "熱処理", Supplier, , , , , IIf(hasSubZeroCmd, "サブゼロ有", ""))
+    ElseIf hasSubZeroCmd And Supplier = "" Then
         Call AddProcessToSheet(ws, currentRow, initialTargetRow, "熱処理", GetOutsourcingSupplierName("HEAT_SUBZERO_DEFAULT"), , , , , "サブゼロ有")
     End If
 
@@ -1447,14 +1765,14 @@ End Sub
 Private Sub AddNaraiKensaku(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long)
     Dim times As Variant
     Dim remarksFromSheetF As String
-    Dim maeDandoriTime As String
+    Dim MaeDandoriTime As String
 
     times = GetProcessTimes("倣い研削")
 
     If IsArray(times) Then
-        maeDandoriTime = CStr(times(0))
+        MaeDandoriTime = CStr(times(0))
         remarksFromSheetF = CStr(times(4))
-        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "倣い研削", , maeDandoriTime, times(1), times(2), times(3), remarksFromSheetF)
+        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "倣い研削", , MaeDandoriTime, times(1), times(2), times(3), remarksFromSheetF)
     Else
         ' 工数情報がない場合はデフォルト値で挿入
         Call AddProcessToSheet(ws, currentRow, initialTargetRow, "倣い研削", , "", "1.0", "", "0.2", "※工数/備考未設定")
@@ -1575,12 +1893,12 @@ End Sub
 Private Sub AddSmallStartHole(ws As Worksheet, ByRef currentRow As Long, initialTargetRow As Long)
     Dim times As Variant
     Dim remarksFromSheetF As String
-    Dim maeDandoriTime As String
+    Dim MaeDandoriTime As String
     times = GetProcessTimes("細穴放電加工")
     If IsArray(times) Then
-        maeDandoriTime = CStr(times(0))
+        MaeDandoriTime = CStr(times(0))
         remarksFromSheetF = CStr(times(4))
-        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "細穴放電加工", , maeDandoriTime, times(1), times(2), times(3), remarksFromSheetF)
+        Call AddProcessToSheet(ws, currentRow, initialTargetRow, "細穴放電加工", , MaeDandoriTime, times(1), times(2), times(3), remarksFromSheetF)
     Else
         Call AddProcessToSheet(ws, currentRow, initialTargetRow, "細穴放電加工", , "", "0.8", , "0.1", "※工数/備考未設定")
     End If
@@ -1757,3 +2075,8 @@ Private Sub AddPolishingAndCoating(ws As Worksheet, ByRef currentRow As Long, in
         End If
     End If
 End Sub
+
+
+
+
+
